@@ -1,0 +1,11 @@
+[package]
+name = "muxhost"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Shared multiplexer host layer for terminal-multiplexer tools: one Host trait over herdr and Rex (pane reads, colored reads, optional scroll info, clipboard)"
+repository = "https://github.com/codingfragments/muxhost"
+
+[dependencies]
+arboard = "3.6.1"
+serde_json = "1"
