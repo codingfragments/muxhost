@@ -25,7 +25,8 @@ pub mod herdr;
 pub mod rex;
 mod socket_client;
 
-#[cfg(test)]
+/// In-memory [`Host`] for unit tests in consuming crates: canned pane
+/// texts, a tab listing, and a record of every read and insert.
 pub mod fake;
 
 /// Which part of a pane's buffer to read.
