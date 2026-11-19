@@ -125,6 +125,15 @@ impl RexHost {
         &self.session
     }
 
+    /// The session a block belongs to, from the (cached) topology —
+    /// block-scoped CLI calls (`rex capture`, `block call`, `send`)
+    /// must scope to the BLOCK's session, not this host's own
+    /// (`-s <own> -b <foreign>` is "block target not found").
+    #[cfg(feature = "topology")]
+    pub fn block_session(&self, block_id: &str) -> Option<String> {
+        self.session_of_block(block_id).ok()
+    }
+
     /// Escape hatch for host-local glue in consuming tools (the same
     /// contract as `HerdrHost::raw_request`): one raw `rex` CLI call on
     /// this host's runner. Keep a tool's non-portable calls behind its
@@ -194,7 +203,15 @@ impl Host for RexHost {
         format: ReadFormat,
         lines: Option<u32>,
     ) -> Result<String, String> {
-        let session = self.session.as_str();
+        // A pane can live in ANY session — scope to the block's, not
+        // this host's own (-s own -b foreign = "not found").
+        #[cfg(feature = "topology")]
+        let session_owned = self
+            .block_session(pane_id)
+            .unwrap_or_else(|| self.session.clone());
+        #[cfg(not(feature = "topology"))]
+        let session_owned = self.session.clone();
+        let session = session_owned.as_str();
         let fmt: Vec<&str> = match format {
             ReadFormat::Plain => vec!["--format", "text"],
             ReadFormat::Ansi => vec!["--format", "vt"],
@@ -244,8 +261,15 @@ impl Host for RexHost {
 
     fn insert_text(&self, pane_id: &str, text: &str) -> Result<(), String> {
         // Through stdin, so text starting with "-" or containing
-        // newlines arrives exactly as given.
-        self.rex(&["send", "-s", &self.session, "-b", pane_id], Some(text))
+        // newlines arrives exactly as given. Scoped to the block's
+        // session — it may not be this host's own.
+        #[cfg(feature = "topology")]
+        let session = self
+            .block_session(pane_id)
+            .unwrap_or_else(|| self.session.clone());
+        #[cfg(not(feature = "topology"))]
+        let session = self.session.clone();
+        self.rex(&["send", "-s", &session, "-b", pane_id], Some(text))
             .map(|_| ())
     }
 }
@@ -845,14 +869,17 @@ mod tests {
 
     #[test]
     fn scrollback_read_captures_unwrapped_and_caps_lines() {
-        let runner = FakeRunner::default().reply(Ok("1\n2\n3\n4\n"));
+        let runner = FakeRunner::default()
+            .reply(Ok("{}")) /* empty topology: block not in it */
+            .reply(Ok("1\n2\n3\n4\n"));
         let text = host(&runner, W1)
             .read_pane(B1, ReadSource::Scrollback, ReadFormat::Plain, Some(2))
             .unwrap();
         assert_eq!(text, "3\n4\n");
         let calls = runner.calls.borrow();
+        // calls[0] is the block-session lookup; the capture is [1].
         assert_eq!(
-            args(&calls[0]),
+            args(&calls[1]),
             vec!["capture", "-s", S, "-b", B1, "--unwrap", "--trim", "--format", "text"]
         );
     }
@@ -860,6 +887,7 @@ mod tests {
     #[test]
     fn viewport_read_keeps_the_bottom_rows() {
         let runner = FakeRunner::default()
+            .reply(Ok("{}")) /* empty topology: block not in it */
             .reply(Ok("old\nr1\nr2\n"))
             .reply(Ok(r#"{"columns":80,"rows":2}"#));
         let text = host(&runner, W1)
@@ -867,23 +895,26 @@ mod tests {
             .unwrap();
         assert_eq!(text, "r1\nr2\n");
         let calls = runner.calls.borrow();
+        // calls[0] is the block-session lookup; capture and size shift by one.
         assert_eq!(
-            args(&calls[0]),
+            args(&calls[1]),
             vec!["capture", "-s", S, "-b", B1, "--format", "text"]
         );
         assert_eq!(
-            args(&calls[1]),
+            args(&calls[2]),
             vec!["block", "call", "-s", S, "-b", B1, "size"]
         );
     }
 
     #[test]
     fn insert_sends_text_through_stdin() {
-        let runner = FakeRunner::default();
+        let runner = FakeRunner::default().reply(Ok("{}")) /* empty topology: block not in it */;
         host(&runner, W1).insert_text(B2, "-rf /tmp/x").unwrap();
         let calls = runner.calls.borrow();
-        assert_eq!(args(&calls[0]), vec!["send", "-s", S, "-b", B2]);
-        assert_eq!(calls[0].1.as_deref(), Some("-rf /tmp/x"));
+        // calls[0] is the block-session lookup (rex do -); the send is [1],
+        // scoped to the fallback session (the block isn't in the snapshot).
+        assert_eq!(args(&calls[1]), vec!["send", "-s", S, "-b", B2]);
+        assert_eq!(calls[1].1.as_deref(), Some("-rf /tmp/x"));
     }
 
     #[test]
@@ -914,7 +945,9 @@ mod tests {
 
     #[test]
     fn cli_errors_are_passed_on() {
-        let runner = FakeRunner::default().reply(Err("rex capture failed: block not found"));
+        let runner = FakeRunner::default()
+            .reply(Ok("{}")) /* empty topology: block not in it */
+            .reply(Err("rex capture failed: block not found"));
         let err = host(&runner, W1)
             .read_pane(B1, ReadSource::Scrollback, ReadFormat::Plain, None)
             .unwrap_err();
