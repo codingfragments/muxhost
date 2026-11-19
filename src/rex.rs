@@ -13,9 +13,11 @@
 //! | `<PREFIX>_SOURCE_WINDOW` | its window (tab); found from the session if unset |
 //! | `REX_CLI` | path of the `rex` CLI (default: `rex` on `PATH`) |
 
+#[cfg(feature = "topology")]
 use std::cell::RefCell;
 use std::io::Write;
 use std::process::{Command, Stdio};
+#[cfg(feature = "topology")]
 use std::time::{Duration, Instant};
 
 use super::{Host, PaneInfo, ReadFormat, ReadSource, SourceRef};
@@ -349,7 +351,7 @@ return out
 #[cfg(feature = "topology")]
 impl RexHost {
     /// Drop the cached snapshot (after a mutation through this host).
-    #[cfg(feature = "topology")]
+    #[cfg(feature = "navigate")]
     fn invalidate_snapshot(&self) {
         self.drop_snapshot();
     }
@@ -384,6 +386,7 @@ impl RexHost {
     }
 
     /// The session a window belongs to, from the (fresh) snapshot.
+    #[cfg(feature = "navigate")]
     fn session_of_window(&self, window_id: &str) -> Result<String, String> {
         self.snapshot()?
             .windows
@@ -414,17 +417,40 @@ fn parse_topology(
         if session_id.is_empty() {
             continue;
         }
+        let is_source_session = session_id == source_session;
         snap.sessions.push(SessionInfo {
             session_id: session_id.clone(),
             label: str_field(s, "label"),
-            active: session_id == source_session,
+            active: is_source_session,
         });
-        for w in s
+        let windows: Vec<&serde_json::Value> = s
             .get("windows")
             .and_then(|w| w.as_array())
             .into_iter()
             .flatten()
-        {
+            .collect();
+        // The window the user is in — at most one, like herdr's focused
+        // tab: in the source session, the window holding the source
+        // block, else the session's active window (a popup's own window
+        // is the active one while it is open).
+        let active_window = is_source_session
+            .then(|| {
+                windows
+                    .iter()
+                    .find(|w| {
+                        !source_block.is_empty()
+                            && w.get("blocks")
+                                .and_then(|b| b.as_array())
+                                .is_some_and(|bs| {
+                                    bs.iter().any(|b| str_field(b, "block_id") == source_block)
+                                })
+                    })
+                    .map(|w| str_field(w, "window_id"))
+                    .or_else(|| Some(str_field(s, "active_window_id")))
+            })
+            .flatten()
+            .filter(|w| !w.is_empty());
+        for w in windows {
             let window_id = str_field(w, "window_id");
             if window_id.is_empty() {
                 continue;
@@ -433,9 +459,7 @@ fn parse_topology(
                 window_id: window_id.clone(),
                 session_id: session_id.clone(),
                 label: str_field(w, "label"),
-                // The script doesn't carry a per-window active flag;
-                // the block list below gets focus from the source block.
-                active: false,
+                active: active_window.as_deref() == Some(window_id.as_str()),
             });
             for b in w
                 .get("blocks")
@@ -817,6 +841,26 @@ mod tests {
         }
     }
 
+    /// With `topology`, block-scoped calls first resolve the block's
+    /// session (one `rex do -` snapshot run); this queues an empty
+    /// snapshot for it, so the block isn't found and the host's own
+    /// session is used. Without `topology` there is no lookup.
+    trait Lookup {
+        fn lookup(self) -> Self;
+    }
+    impl Lookup for FakeRunner {
+        fn lookup(self) -> Self {
+            if cfg!(feature = "topology") {
+                self.reply(Ok("{}"))
+            } else {
+                self
+            }
+        }
+    }
+
+    /// Index of the first real CLI call (after the optional lookup).
+    const L: usize = if cfg!(feature = "topology") { 1 } else { 0 };
+
     fn host(runner: &FakeRunner, window: &str) -> RexHost {
         RexHost::new(
             Box::new(runner.clone()),
@@ -886,17 +930,15 @@ mod tests {
 
     #[test]
     fn scrollback_read_captures_unwrapped_and_caps_lines() {
-        let runner = FakeRunner::default()
-            .reply(Ok("{}")) /* empty topology: block not in it */
-            .reply(Ok("1\n2\n3\n4\n"));
+        let runner = FakeRunner::default().lookup().reply(Ok("1\n2\n3\n4\n"));
         let text = host(&runner, W1)
             .read_pane(B1, ReadSource::Scrollback, ReadFormat::Plain, Some(2))
             .unwrap();
         assert_eq!(text, "3\n4\n");
         let calls = runner.calls.borrow();
-        // calls[0] is the block-session lookup; the capture is [1].
+        // After the optional block-session lookup (see `L`): the capture.
         assert_eq!(
-            args(&calls[1]),
+            args(&calls[L]),
             vec!["capture", "-s", S, "-b", B1, "--unwrap", "--trim", "--format", "text"]
         );
     }
@@ -904,7 +946,7 @@ mod tests {
     #[test]
     fn viewport_read_keeps_the_bottom_rows() {
         let runner = FakeRunner::default()
-            .reply(Ok("{}")) /* empty topology: block not in it */
+            .lookup()
             .reply(Ok("old\nr1\nr2\n"))
             .reply(Ok(r#"{"columns":80,"rows":2}"#));
         let text = host(&runner, W1)
@@ -912,26 +954,26 @@ mod tests {
             .unwrap();
         assert_eq!(text, "r1\nr2\n");
         let calls = runner.calls.borrow();
-        // calls[0] is the block-session lookup; capture and size shift by one.
+        // After the optional block-session lookup (see `L`): capture, then size.
         assert_eq!(
-            args(&calls[1]),
+            args(&calls[L]),
             vec!["capture", "-s", S, "-b", B1, "--format", "text"]
         );
         assert_eq!(
-            args(&calls[2]),
+            args(&calls[L + 1]),
             vec!["block", "call", "-s", S, "-b", B1, "size"]
         );
     }
 
     #[test]
     fn insert_sends_text_through_stdin() {
-        let runner = FakeRunner::default().reply(Ok("{}")) /* empty topology: block not in it */;
+        let runner = FakeRunner::default().lookup();
         host(&runner, W1).insert_text(B2, "-rf /tmp/x").unwrap();
         let calls = runner.calls.borrow();
-        // calls[0] is the block-session lookup (rex do -); the send is [1],
+        // After the optional block-session lookup (see `L`): the send,
         // scoped to the fallback session (the block isn't in the snapshot).
-        assert_eq!(args(&calls[1]), vec!["send", "-s", S, "-b", B2]);
-        assert_eq!(calls[1].1.as_deref(), Some("-rf /tmp/x"));
+        assert_eq!(args(&calls[L]), vec!["send", "-s", S, "-b", B2]);
+        assert_eq!(calls[L].1.as_deref(), Some("-rf /tmp/x"));
     }
 
     #[test]
@@ -963,242 +1005,287 @@ mod tests {
     #[test]
     fn cli_errors_are_passed_on() {
         let runner = FakeRunner::default()
-            .reply(Ok("{}")) /* empty topology: block not in it */
+            .lookup()
             .reply(Err("rex capture failed: block not found"));
         let err = host(&runner, W1)
             .read_pane(B1, ReadSource::Scrollback, ReadFormat::Plain, None)
             .unwrap_err();
         assert_eq!(err, "rex capture failed: block not found");
     }
-    // ── topology + navigate (the `rex do` snapshot) ────────────────────
+    #[cfg(feature = "topology")]
+    mod snapshot {
+        use super::*;
 
-    const TOPOLOGY: &str = include_str!("../tests/fixtures/rex/topology-do.json");
+        // ── topology + navigate (the `rex do` snapshot) ────────────────────
 
-    fn topology_host(runner: &FakeRunner) -> RexHost {
-        RexHost::new(
-            Box::new(runner.clone()),
-            S.to_string(),
-            SourceRef {
-                pane_id: B1.to_string(),
-                tab_id: W1.to_string(),
-            },
-        )
-    }
+        const TOPOLOGY: &str = include_str!("../tests/fixtures/rex/topology-do.json");
 
-    #[test]
-    fn topology_snapshot_parses_titles_cwd_and_active() {
-        let runner = FakeRunner::default().reply(Ok(TOPOLOGY));
-        let host = topology_host(&runner);
-        let snap = host.topology_snapshot().unwrap();
-        // Recorded fixture: 3 sessions (rolling-hollow, nav-r0-target,
-        // selftest), 4 windows, 6 blocks.
-        assert_eq!(snap.sessions.len(), 3);
-        assert_eq!(snap.windows.len(), 4);
-        assert_eq!(snap.panes.len(), 6);
-        // The source session is the active one; the source block the
-        // focused pane. The fixture's sessions don't include our S, so
-        // nothing is active here — assert that contract instead.
-        assert!(snap.sessions.iter().all(|s| !s.active));
-        assert!(snap.panes.iter().all(|p| !p.is_focused));
-        // Terminal titles replace Rex's uninformative "shell" labels.
-        assert!(snap
-            .panes
-            .iter()
-            .any(|p| p.title == "~/p/m/w/h/herdr-flash"));
-        // cwd from the file:// URL: path only, no scheme or host.
-        assert!(snap.panes.iter().any(|p| p.cwd.as_deref()
-            == Some(
-                "/Users/stefan.marx/projekteHome/marxworld/workEnvironment/herdr/herdr-flash"
-            )));
-        // No program status reported anywhere → no agents (the fixture
-        // carries records as {} — gopher-lua's empty-table shape).
-        assert!(snap.agents.is_empty());
-    }
+        fn topology_host(runner: &FakeRunner) -> RexHost {
+            RexHost::new(
+                Box::new(runner.clone()),
+                S.to_string(),
+                SourceRef {
+                    pane_id: B1.to_string(),
+                    tab_id: W1.to_string(),
+                },
+            )
+        }
 
-    #[test]
-    fn topology_snapshot_caches_until_invalidated() {
-        let runner = FakeRunner::default().reply(Ok(TOPOLOGY));
-        let host = topology_host(&runner);
-        let _ = host.topology_snapshot().unwrap();
-        let _ = host.list_all_panes().unwrap();
-        let _ = host.list_sessions().unwrap();
-        // One `rex do -` run serves every list method (the cached
-        // snapshot); stdin carries the script.
-        let calls = runner.calls.borrow();
-        let do_calls: Vec<&Call> = calls
-            .iter()
-            .filter(|(args, _)| args.first().map(String::as_str) == Some("do"))
-            .collect();
-        assert_eq!(do_calls.len(), 1);
-        assert_eq!(do_calls[0].0, vec!["do", "-"]);
-        assert!(do_calls[0].1.as_deref().unwrap().contains("session.attach"));
-    }
-
-    #[test]
-    fn close_pane_resolves_session_then_invalidates() {
-        // The fixture's first block lives in rolling-hollow's window; the
-        // snapshot maps block→session for the close call.
-        let runner = FakeRunner::default()
-            .reply(Ok(TOPOLOGY)) // snapshot for session_of_block
-            .reply(Ok("")) //       the close itself
-            .reply(Ok(TOPOLOGY)); // the post-close snapshot (cache was dropped)
-        let host = topology_host(&runner);
-        let target = "block:01a1da11-70e7-71a5-8205-a8e0868feaca";
-        host.close_pane(target).unwrap();
-        {
-            let calls = runner.calls.borrow();
-            let close = calls
+        #[test]
+        fn topology_snapshot_parses_titles_cwd_and_active() {
+            let runner = FakeRunner::default().reply(Ok(TOPOLOGY));
+            let host = topology_host(&runner);
+            let snap = host.topology_snapshot().unwrap();
+            // Recorded fixture: 3 sessions (rolling-hollow, nav-r0-target,
+            // selftest), 4 windows, 6 blocks.
+            assert_eq!(snap.sessions.len(), 3);
+            assert_eq!(snap.windows.len(), 4);
+            assert_eq!(snap.panes.len(), 6);
+            // The source session is the active one; the source block the
+            // focused pane. The fixture's sessions don't include our S, so
+            // nothing is active here — assert that contract instead.
+            assert!(snap.sessions.iter().all(|s| !s.active));
+            assert!(snap.panes.iter().all(|p| !p.is_focused));
+            // Terminal titles replace Rex's uninformative "shell" labels.
+            assert!(snap
+                .panes
                 .iter()
-                .find(|(args, _)| args.first().map(String::as_str) == Some("block"))
-                .unwrap();
+                .any(|p| p.title == "~/p/m/w/h/herdr-flash"));
+            // cwd from the file:// URL: path only, no scheme or host.
+            assert!(snap.panes.iter().any(|p| p.cwd.as_deref()
+                == Some(
+                    "/Users/stefan.marx/projekteHome/marxworld/workEnvironment/herdr/herdr-flash"
+                )));
+            // No program status reported anywhere → no agents (the fixture
+            // carries records as {} — gopher-lua's empty-table shape).
+            assert!(snap.agents.is_empty());
+        }
+
+        #[test]
+        fn topology_marks_the_users_window_active() {
+            // rolling-hollow is the source session in this run; its
+            // recorded active_window_id is the 1-block window.
+            let doc: serde_json::Value = serde_json::from_str(TOPOLOGY).unwrap();
+            let rolling = "session:01a1da11-70e7-708c-9cb3-986c917a8c85";
+            let active_w = "window:01a1f0f1-1d81-7ee0-ad72-c32a32e7b4c6";
+            let other_w = "window:01a1da11-7120-7c2d-a1ec-0dbcf977330d";
+
+            // No source block → the session's active window.
+            let snap = parse_topology(&doc, rolling, "").unwrap();
+            let active: Vec<&str> = snap
+                .windows
+                .iter()
+                .filter(|w| w.active)
+                .map(|w| w.window_id.as_str())
+                .collect();
+            assert_eq!(active, vec![active_w]);
+
+            // A source block in the OTHER window wins over active_window_id.
+            let in_other = "block:01a1da11-70e7-71a5-8205-a8e0868feaca";
+            let snap = parse_topology(&doc, rolling, in_other).unwrap();
+            let active: Vec<&str> = snap
+                .windows
+                .iter()
+                .filter(|w| w.active)
+                .map(|w| w.window_id.as_str())
+                .collect();
+            assert_eq!(active, vec![other_w]);
+
+            // Windows of other sessions are never active.
+            assert!(snap
+                .windows
+                .iter()
+                .filter(|w| w.session_id != rolling)
+                .all(|w| !w.active));
+        }
+
+        #[test]
+        fn topology_snapshot_caches_until_invalidated() {
+            let runner = FakeRunner::default().reply(Ok(TOPOLOGY));
+            let host = topology_host(&runner);
+            let _ = host.topology_snapshot().unwrap();
+            let _ = host.list_all_panes().unwrap();
+            let _ = host.list_sessions().unwrap();
+            // One `rex do -` run serves every list method (the cached
+            // snapshot); stdin carries the script.
+            let calls = runner.calls.borrow();
+            let do_calls: Vec<&Call> = calls
+                .iter()
+                .filter(|(args, _)| args.first().map(String::as_str) == Some("do"))
+                .collect();
+            assert_eq!(do_calls.len(), 1);
+            assert_eq!(do_calls[0].0, vec!["do", "-"]);
+            assert!(do_calls[0].1.as_deref().unwrap().contains("session.attach"));
+        }
+
+        #[cfg(feature = "navigate")]
+        #[test]
+        fn close_pane_resolves_session_then_invalidates() {
+            // The fixture's first block lives in rolling-hollow's window; the
+            // snapshot maps block→session for the close call.
+            let runner = FakeRunner::default()
+                .reply(Ok(TOPOLOGY)) // snapshot for session_of_block
+                .reply(Ok("")) //       the close itself
+                .reply(Ok(TOPOLOGY)); // the post-close snapshot (cache was dropped)
+            let host = topology_host(&runner);
+            let target = "block:01a1da11-70e7-71a5-8205-a8e0868feaca";
+            host.close_pane(target).unwrap();
+            {
+                let calls = runner.calls.borrow();
+                let close = calls
+                    .iter()
+                    .find(|(args, _)| args.first().map(String::as_str) == Some("block"))
+                    .unwrap();
+                assert_eq!(
+                    close.0,
+                    vec![
+                        "block".to_string(),
+                        "close".to_string(),
+                        "-s".to_string(),
+                        "session:01a1da11-70e7-708c-9cb3-986c917a8c85".to_string(),
+                        target.to_string(),
+                    ]
+                );
+            }
+            // The close invalidated the cache: the next snapshot runs the
+            // script again.
+            let _ = host.topology_snapshot().unwrap();
             assert_eq!(
-                close.0,
+                runner
+                    .calls
+                    .borrow()
+                    .iter()
+                    .filter(|(args, _)| args.first().map(String::as_str) == Some("do"))
+                    .count(),
+                2
+            );
+        }
+
+        #[cfg(feature = "navigate")]
+        #[test]
+        fn jump_is_delegated_and_renames_close_via_cli() {
+            // A block from the recorded fixture (rolling-hollow's first).
+            let target = "block:01a1da11-70e7-71a5-8205-a8e0868feaca";
+            let target_session = "session:01a1da11-70e7-708c-9cb3-986c917a8c85";
+            let runner = FakeRunner::default()
+                .reply(Ok(TOPOLOGY)) // snapshot: session_of_block (jump) + of_window (rename)
+                .reply(Ok("")) // rex focus (the jump's server side)
+                .reply(Ok("")); // window rename
+            let host = topology_host(&runner);
+            // The jump's server side runs now (rex focus via a CLI child —
+            // attaching to the target session works from there); the app's
+            // view is client-side, so the outcome is still Delegated (the
+            // tool follows up with `rex -C <client> do session.select`).
+            assert_eq!(
+                host.jump(Jump::FocusPane {
+                    pane_id: target.to_string()
+                })
+                .unwrap(),
+                JumpOutcome::Delegated
+            );
+            let calls = runner.calls.borrow();
+            let focus = calls
+                .iter()
+                .find(|(args, _)| args.first().map(String::as_str) == Some("focus"))
+                .expect("jump must run rex focus for its server side");
+            assert_eq!(
+                focus.0,
                 vec![
-                    "block".to_string(),
-                    "close".to_string(),
+                    "focus".to_string(),
                     "-s".to_string(),
-                    "session:01a1da11-70e7-708c-9cb3-986c917a8c85".to_string(),
+                    target_session.to_string(),
                     target.to_string(),
                 ]
             );
-        }
-        // The close invalidated the cache: the next snapshot runs the
-        // script again.
-        let _ = host.topology_snapshot().unwrap();
-        assert_eq!(
-            runner
-                .calls
-                .borrow()
+            drop(calls);
+            host.rename_window("window:01a1da11-7120-7c2d-a1ec-0dbcf977330d", "renamed")
+                .unwrap();
+            let calls = runner.calls.borrow();
+            let rename = calls
                 .iter()
-                .filter(|(args, _)| args.first().map(String::as_str) == Some("do"))
-                .count(),
-            2
-        );
-    }
-
-    #[test]
-    fn jump_is_delegated_and_renames_close_via_cli() {
-        // A block from the recorded fixture (rolling-hollow's first).
-        let target = "block:01a1da11-70e7-71a5-8205-a8e0868feaca";
-        let target_session = "session:01a1da11-70e7-708c-9cb3-986c917a8c85";
-        let runner = FakeRunner::default()
-            .reply(Ok(TOPOLOGY)) // snapshot: session_of_block (jump) + of_window (rename)
-            .reply(Ok("")) // rex focus (the jump's server side)
-            .reply(Ok("")); // window rename
-        let host = topology_host(&runner);
-        // The jump's server side runs now (rex focus via a CLI child —
-        // attaching to the target session works from there); the app's
-        // view is client-side, so the outcome is still Delegated (the
-        // tool follows up with `rex -C <client> do session.select`).
-        assert_eq!(
-            host.jump(Jump::FocusPane {
-                pane_id: target.to_string()
-            })
-            .unwrap(),
-            JumpOutcome::Delegated
-        );
-        let calls = runner.calls.borrow();
-        let focus = calls
-            .iter()
-            .find(|(args, _)| args.first().map(String::as_str) == Some("focus"))
-            .expect("jump must run rex focus for its server side");
-        assert_eq!(
-            focus.0,
-            vec![
-                "focus".to_string(),
-                "-s".to_string(),
-                target_session.to_string(),
-                target.to_string(),
-            ]
-        );
-        drop(calls);
-        host.rename_window("window:01a1da11-7120-7c2d-a1ec-0dbcf977330d", "renamed")
-            .unwrap();
-        let calls = runner.calls.borrow();
-        let rename = calls
-            .iter()
-            .find(|(args, _)| args.first().map(String::as_str) == Some("window"))
-            .unwrap();
-        assert_eq!(
-            rename.0[1..],
-            vec![
-                "rename".to_string(),
-                "-s".to_string(),
-                "session:01a1da11-70e7-708c-9cb3-986c917a8c85".to_string(),
-                "window:01a1da11-7120-7c2d-a1ec-0dbcf977330d".to_string(),
-                "renamed".to_string(),
-            ]
-        );
-    }
-
-    /// Live check against a running Rex server: set REX_CLI (and
-    /// optionally REX_SESSION) and run with --ignored. Verifies the
-    /// script runs through `rex do -` (stdin) and the JSON parses.
-    #[test]
-    #[ignore = "needs a running Rex server; set REX_CLI"]
-    fn live_rex_topology_snapshot() {
-        let cli = std::env::var("REX_CLI").unwrap_or_else(|_| "rex".to_string());
-        let session = std::env::var("REX_SESSION").unwrap_or_default();
-        let host = RexHost::new(
-            Box::new(CliRunner { cli }),
-            session,
-            SourceRef {
-                pane_id: String::new(),
-                tab_id: String::new(),
-            },
-        );
-        let snap = host.topology_snapshot().unwrap();
-        eprintln!("sessions: {}", snap.sessions.len());
-        for s in &snap.sessions {
-            eprintln!(
-                "  {} ({} panes){}",
-                s.label,
-                snap.panes
-                    .iter()
-                    .filter(|p| p.session_id == s.session_id)
-                    .count(),
-                if s.active { " [active]" } else { "" }
+                .find(|(args, _)| args.first().map(String::as_str) == Some("window"))
+                .unwrap();
+            assert_eq!(
+                rename.0[1..],
+                vec![
+                    "rename".to_string(),
+                    "-s".to_string(),
+                    "session:01a1da11-70e7-708c-9cb3-986c917a8c85".to_string(),
+                    "window:01a1da11-7120-7c2d-a1ec-0dbcf977330d".to_string(),
+                    "renamed".to_string(),
+                ]
             );
-            for p in snap.panes.iter().filter(|p| p.session_id == s.session_id) {
-                eprintln!("    - {} cwd={:?} title={:?}", p.pane_id, p.cwd, p.title);
-            }
         }
-        assert!(!snap.sessions.is_empty());
-    }
-    #[test]
-    fn topology_shows_user_labels_over_terminal_titles() {
-        // A user-renamed block (label "A12") must show "A12" even when
-        // the terminal reports a title ("~"); a "shell"-labeled block
-        // still shows the terminal title (spec §4.1: label → title →
-        // generic, and Rex's default label is the useless "shell").
-        let doc = serde_json::json!({
-            "sessions": [{
-                "session_id": "session:sA", "label": "A",
-                "windows": [{
-                    "window_id": "window:wA", "label": "wA",
-                    "blocks": [
-                        { "block_id": "block:A12", "label": "A12",
-                          "title": { "title": "~" },
-                          "program_status": { "records": [] } },
-                        { "block_id": "block:shelly", "label": "shell",
-                          "title": { "title": "~/src" },
-                          "program_status": { "records": [] } },
-                    ],
+
+        /// Live check against a running Rex server: set REX_CLI (and
+        /// optionally REX_SESSION) and run with --ignored. Verifies the
+        /// script runs through `rex do -` (stdin) and the JSON parses.
+        #[test]
+        #[ignore = "needs a running Rex server; set REX_CLI"]
+        fn live_rex_topology_snapshot() {
+            let cli = std::env::var("REX_CLI").unwrap_or_else(|_| "rex".to_string());
+            let session = std::env::var("REX_SESSION").unwrap_or_default();
+            let host = RexHost::new(
+                Box::new(CliRunner { cli }),
+                session,
+                SourceRef {
+                    pane_id: String::new(),
+                    tab_id: String::new(),
+                },
+            );
+            let snap = host.topology_snapshot().unwrap();
+            eprintln!("sessions: {}", snap.sessions.len());
+            for s in &snap.sessions {
+                eprintln!(
+                    "  {} ({} panes){}",
+                    s.label,
+                    snap.panes
+                        .iter()
+                        .filter(|p| p.session_id == s.session_id)
+                        .count(),
+                    if s.active { " [active]" } else { "" }
+                );
+                for p in snap.panes.iter().filter(|p| p.session_id == s.session_id) {
+                    eprintln!("    - {} cwd={:?} title={:?}", p.pane_id, p.cwd, p.title);
+                }
+            }
+            assert!(!snap.sessions.is_empty());
+        }
+        #[test]
+        fn topology_shows_user_labels_over_terminal_titles() {
+            // A user-renamed block (label "A12") must show "A12" even when
+            // the terminal reports a title ("~"); a "shell"-labeled block
+            // still shows the terminal title (spec §4.1: label → title →
+            // generic, and Rex's default label is the useless "shell").
+            let doc = serde_json::json!({
+                "sessions": [{
+                    "session_id": "session:sA", "label": "A",
+                    "windows": [{
+                        "window_id": "window:wA", "label": "wA",
+                        "blocks": [
+                            { "block_id": "block:A12", "label": "A12",
+                              "title": { "title": "~" },
+                              "program_status": { "records": [] } },
+                            { "block_id": "block:shelly", "label": "shell",
+                              "title": { "title": "~/src" },
+                              "program_status": { "records": [] } },
+                        ],
+                    }],
                 }],
-            }],
-        });
-        let snap = parse_topology(&doc, "session:sA", "").unwrap();
-        let a12 = snap
-            .panes
-            .iter()
-            .find(|p| p.pane_id == "block:A12")
-            .unwrap();
-        assert_eq!(a12.title, "A12");
-        let shelly = snap
-            .panes
-            .iter()
-            .find(|p| p.pane_id == "block:shelly")
-            .unwrap();
-        assert_eq!(shelly.title, "~/src");
+            });
+            let snap = parse_topology(&doc, "session:sA", "").unwrap();
+            let a12 = snap
+                .panes
+                .iter()
+                .find(|p| p.pane_id == "block:A12")
+                .unwrap();
+            assert_eq!(a12.title, "A12");
+            let shelly = snap
+                .panes
+                .iter()
+                .find(|p| p.pane_id == "block:shelly")
+                .unwrap();
+            assert_eq!(shelly.title, "~/src");
+        }
     }
 }
