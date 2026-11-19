@@ -37,6 +37,33 @@ impl HerdrHost {
             source,
         })
     }
+
+    /// A host over an explicit socket path with no known source pane
+    /// (empty [`SourceRef`]): for tools whose launch context is
+    /// optional — the socket API stays usable, only the source-pane
+    /// conveniences ([`Host::list_tab_panes`] and friends) find nothing.
+    pub fn with_socket(socket_path: String) -> Self {
+        Self {
+            socket_path,
+            source: SourceRef {
+                pane_id: String::new(),
+                tab_id: String::new(),
+            },
+        }
+    }
+
+    /// Escape hatch for host-local glue in consuming tools (see
+    /// herdr-nav's `src/host_ext/`): one raw request on this host's
+    /// socket, on the same fresh-connection-per-call contract as every
+    /// other call here. Keep a tool's non-portable calls behind its own
+    /// local trait so the port to a second host stays findable.
+    pub fn raw_request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        socket_client::request(&self.socket_path, method, params).map_err(|e| e.to_string())
+    }
 }
 
 impl Host for HerdrHost {
@@ -556,6 +583,15 @@ mod tests {
         assert!(launch_context(None, None).is_err());
         assert!(launch_context(Some(r#"{"tab_id": "t"}"#), None).is_err());
         assert!(launch_context(Some("not json"), None).is_err());
+    }
+
+    #[test]
+    fn with_socket_has_empty_source() {
+        let h = HerdrHost::with_socket("/tmp/nope.sock".to_string());
+        assert_eq!(h.source().pane_id, "");
+        assert_eq!(h.source().tab_id, "");
+        // A missing socket surfaces as an error, not a panic.
+        assert!(h.raw_request("pane.list", serde_json::json!({})).is_err());
     }
 }
 
