@@ -88,6 +88,19 @@ pub struct AgentEntry {
     pub status: AgentStatus,
 }
 
+/// The whole topology in one answer: sessions, their windows, their
+/// panes, and the agent panes. Built for tree-style switchers that
+/// need everything at once — under Rex one script run collects all of
+/// it (see `HostTopology::topology_snapshot`), where the four list
+/// methods would each pay the round trip.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TopologySnapshot {
+    pub sessions: Vec<SessionInfo>,
+    pub windows: Vec<WindowInfo>,
+    pub panes: Vec<PaneEntry>,
+    pub agents: Vec<AgentEntry>,
+}
+
 /// Layout knowledge for tree-style switchers.
 pub trait HostTopology: Host {
     /// Every session, in the host's order.
@@ -101,4 +114,17 @@ pub trait HostTopology: Host {
 
     /// Every pane running an agent, with its status.
     fn list_agents(&self) -> Result<Vec<AgentEntry>, String>;
+
+    /// Everything above in one call. The default assembles it from the
+    /// four list methods (herdr's four socket calls are cheap); hosts
+    /// where a round trip is expensive (Rex: one `rex do` script)
+    /// override this and the list methods read from the same snapshot.
+    fn topology_snapshot(&self) -> Result<TopologySnapshot, String> {
+        Ok(TopologySnapshot {
+            sessions: self.list_sessions()?,
+            windows: self.list_windows()?,
+            panes: self.list_all_panes()?,
+            agents: self.list_agents()?,
+        })
+    }
 }
