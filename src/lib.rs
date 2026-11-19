@@ -2,7 +2,10 @@
 //! inside terminal multiplexers (herdr, Rex).
 //!
 //! One [`Host`] trait, implemented per multiplexer, so a tool's
-//! matchers, pickers and actions stay host-agnostic. Consumers so far:
+//! matchers, pickers and actions stay host-agnostic. The reference
+//! documentation (each feature's intent, API, herdr and Rex
+//! implementation, the consumer contracts) is in the repository's
+//! `doc/` directory, starting at `doc/architecture.md`. Consumers so far:
 //! [herdr-zextract](https://github.com/codingfragments/herdr-zextract),
 //! [herdr-flash](https://github.com/codingfragments/herdr-flash),
 //! [herdr-nav](https://github.com/codingfragments/herdr-nav).
