@@ -11,6 +11,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [blacksmith-4vcpu-ubuntu-2604, blacksmith-6vcpu-macos-15]
+        # Every feature combination a consumer can pin: core only
+        # (flash, zextract), topology alone, and navigate (nav; it
+        # implies topology). Feature-gated code that only builds with
+        # --all-features went unnoticed once (CI red v0.3.0–v0.3.5).
+        features: ["", "--features topology", "--all-features"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +30,7 @@ jobs:
         run: cargo fmt --check
 
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
 
       - name: cargo test
-        run: cargo test
+        run: cargo test ${{ matrix.features }}
