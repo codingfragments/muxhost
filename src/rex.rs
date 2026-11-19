@@ -449,11 +449,28 @@ fn parse_topology(
                 }
                 let title = block_title(b);
                 let cwd = block_pwd(b);
+                // A user-set label beats the terminal title (herdr's
+                // spec §4.1 order: label → terminal title → generic) —
+                // the user NAMED this pane. Rex defaults every block's
+                // label to "shell", which says nothing, so only a
+                // non-generic label wins over the terminal title.
+                let label = str_field(b, "label");
+                let display_title = if !label.is_empty() && label != "shell" {
+                    label
+                } else {
+                    title.clone().unwrap_or_else(|| {
+                        if !label.is_empty() {
+                            label
+                        } else {
+                            format!("pane {block_id}")
+                        }
+                    })
+                };
                 let pane = PaneEntry {
                     pane_id: block_id.clone(),
                     session_id: session_id.clone(),
                     window_id: window_id.clone(),
-                    title: title.clone().unwrap_or_else(|| str_field(b, "label")),
+                    title: display_title,
                     is_focused: !source_block.is_empty() && block_id == source_block,
                     cwd,
                 };
@@ -1147,5 +1164,41 @@ mod tests {
             }
         }
         assert!(!snap.sessions.is_empty());
+    }
+    #[test]
+    fn topology_shows_user_labels_over_terminal_titles() {
+        // A user-renamed block (label "A12") must show "A12" even when
+        // the terminal reports a title ("~"); a "shell"-labeled block
+        // still shows the terminal title (spec §4.1: label → title →
+        // generic, and Rex's default label is the useless "shell").
+        let doc = serde_json::json!({
+            "sessions": [{
+                "session_id": "session:sA", "label": "A",
+                "windows": [{
+                    "window_id": "window:wA", "label": "wA",
+                    "blocks": [
+                        { "block_id": "block:A12", "label": "A12",
+                          "title": { "title": "~" },
+                          "program_status": { "records": [] } },
+                        { "block_id": "block:shelly", "label": "shell",
+                          "title": { "title": "~/src" },
+                          "program_status": { "records": [] } },
+                    ],
+                }],
+            }],
+        });
+        let snap = parse_topology(&doc, "session:sA", "").unwrap();
+        let a12 = snap
+            .panes
+            .iter()
+            .find(|p| p.pane_id == "block:A12")
+            .unwrap();
+        assert_eq!(a12.title, "A12");
+        let shelly = snap
+            .panes
+            .iter()
+            .find(|p| p.pane_id == "block:shelly")
+            .unwrap();
+        assert_eq!(shelly.title, "~/src");
     }
 }
