@@ -417,17 +417,40 @@ fn parse_topology(
         if session_id.is_empty() {
             continue;
         }
+        let is_source_session = session_id == source_session;
         snap.sessions.push(SessionInfo {
             session_id: session_id.clone(),
             label: str_field(s, "label"),
-            active: session_id == source_session,
+            active: is_source_session,
         });
-        for w in s
+        let windows: Vec<&serde_json::Value> = s
             .get("windows")
             .and_then(|w| w.as_array())
             .into_iter()
             .flatten()
-        {
+            .collect();
+        // The window the user is in — at most one, like herdr's focused
+        // tab: in the source session, the window holding the source
+        // block, else the session's active window (a popup's own window
+        // is the active one while it is open).
+        let active_window = is_source_session
+            .then(|| {
+                windows
+                    .iter()
+                    .find(|w| {
+                        !source_block.is_empty()
+                            && w.get("blocks")
+                                .and_then(|b| b.as_array())
+                                .is_some_and(|bs| {
+                                    bs.iter().any(|b| str_field(b, "block_id") == source_block)
+                                })
+                    })
+                    .map(|w| str_field(w, "window_id"))
+                    .or_else(|| Some(str_field(s, "active_window_id")))
+            })
+            .flatten()
+            .filter(|w| !w.is_empty());
+        for w in windows {
             let window_id = str_field(w, "window_id");
             if window_id.is_empty() {
                 continue;
@@ -436,9 +459,7 @@ fn parse_topology(
                 window_id: window_id.clone(),
                 session_id: session_id.clone(),
                 label: str_field(w, "label"),
-                // The script doesn't carry a per-window active flag;
-                // the block list below gets focus from the source block.
-                active: false,
+                active: active_window.as_deref() == Some(window_id.as_str()),
             });
             for b in w
                 .get("blocks")
@@ -1038,6 +1059,44 @@ mod tests {
             // No program status reported anywhere → no agents (the fixture
             // carries records as {} — gopher-lua's empty-table shape).
             assert!(snap.agents.is_empty());
+        }
+
+        #[test]
+        fn topology_marks_the_users_window_active() {
+            // rolling-hollow is the source session in this run; its
+            // recorded active_window_id is the 1-block window.
+            let doc: serde_json::Value = serde_json::from_str(TOPOLOGY).unwrap();
+            let rolling = "session:01a1da11-70e7-708c-9cb3-986c917a8c85";
+            let active_w = "window:01a1f0f1-1d81-7ee0-ad72-c32a32e7b4c6";
+            let other_w = "window:01a1da11-7120-7c2d-a1ec-0dbcf977330d";
+
+            // No source block → the session's active window.
+            let snap = parse_topology(&doc, rolling, "").unwrap();
+            let active: Vec<&str> = snap
+                .windows
+                .iter()
+                .filter(|w| w.active)
+                .map(|w| w.window_id.as_str())
+                .collect();
+            assert_eq!(active, vec![active_w]);
+
+            // A source block in the OTHER window wins over active_window_id.
+            let in_other = "block:01a1da11-70e7-71a5-8205-a8e0868feaca";
+            let snap = parse_topology(&doc, rolling, in_other).unwrap();
+            let active: Vec<&str> = snap
+                .windows
+                .iter()
+                .filter(|w| w.active)
+                .map(|w| w.window_id.as_str())
+                .collect();
+            assert_eq!(active, vec![other_w]);
+
+            // Windows of other sessions are never active.
+            assert!(snap
+                .windows
+                .iter()
+                .filter(|w| w.session_id != rolling)
+                .all(|w| !w.active));
         }
 
         #[test]
