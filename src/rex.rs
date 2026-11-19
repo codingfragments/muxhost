@@ -129,8 +129,22 @@ impl RexHost {
     /// contract as `HerdrHost::raw_request`): one raw `rex` CLI call on
     /// this host's runner. Keep a tool's non-portable calls behind its
     /// own local traits so the port surface stays findable.
+    ///
+    /// Mutating escape-hatch calls (`rex new`, `window new`, `split`…)
+    /// change the topology, so the cached snapshot is dropped — the
+    /// next topology read re-runs the script and sees the new blocks.
     pub fn run(&self, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
-        self.rex(args, stdin)
+        let out = self.rex(args, stdin)?;
+        self.drop_snapshot();
+        Ok(out)
+    }
+
+    /// Drop the cached topology snapshot.
+    fn drop_snapshot(&self) {
+        #[cfg(feature = "topology")]
+        {
+            *self.snapshot.borrow_mut() = None;
+        }
     }
 
     fn rex(&self, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
@@ -311,8 +325,9 @@ return out
 #[cfg(feature = "topology")]
 impl RexHost {
     /// Drop the cached snapshot (after a mutation through this host).
+    #[cfg(feature = "topology")]
     fn invalidate_snapshot(&self) {
-        *self.snapshot.borrow_mut() = None;
+        self.drop_snapshot();
     }
 
     /// The topology snapshot, from cache when fresh, else one script run.

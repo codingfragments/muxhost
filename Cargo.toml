@@ -9,7 +9,7 @@ repository = "https://github.com/codingfragments/muxhost"
 [features]
 default = []
 topology = []
-navigate = []
+navigate = ["topology"]
 
 [dependencies]
 arboard = "3.6.1"
