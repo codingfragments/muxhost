@@ -540,7 +540,25 @@ impl HostTopology for RexHost {
 
 #[cfg(feature = "navigate")]
 impl HostNavigate for RexHost {
-    fn jump(&self, _jump: Jump) -> Result<JumpOutcome, String> {
+    /// The SERVER side of the jump runs right here (`rex focus` on the
+    /// target block — attaching to its session works from a CLI child;
+    /// `session.focus_block` from a foreign-attached connection does
+    /// not, R0 finding). The APP's view (which session it shows) is
+    /// client-side and needs `session.select` via `client.perform` —
+    /// the tool carries that out itself with `rex -C <client> do`
+    /// (Remote Control), so the outcome is still [`JumpOutcome::Delegated`].
+    fn jump(&self, jump: Jump) -> Result<JumpOutcome, String> {
+        let (session, block) = match &jump {
+            Jump::FocusPane { pane_id } => (self.session_of_block(pane_id)?, Some(pane_id.clone())),
+            Jump::SelectSession {
+                session_id,
+                focus_pane,
+            } => (session_id.clone(), focus_pane.clone()),
+        };
+        if let Some(block) = block {
+            self.rex(&["focus", "-s", &session, &block], None)
+                .map_err(|e| format!("rex focus: {e}"))?;
+        }
         Ok(JumpOutcome::Delegated)
     }
 
@@ -995,18 +1013,40 @@ mod tests {
 
     #[test]
     fn jump_is_delegated_and_renames_close_via_cli() {
+        // A block from the recorded fixture (rolling-hollow's first).
+        let target = "block:01a1da11-70e7-71a5-8205-a8e0868feaca";
+        let target_session = "session:01a1da11-70e7-708c-9cb3-986c917a8c85";
         let runner = FakeRunner::default()
-            .reply(Ok(TOPOLOGY)) // snapshot for session_of_window
+            .reply(Ok(TOPOLOGY)) // snapshot: session_of_block (jump) + of_window (rename)
+            .reply(Ok("")) // rex focus (the jump's server side)
             .reply(Ok("")); // window rename
         let host = topology_host(&runner);
-        // The app's view is client-side; the launcher carries the jump.
+        // The jump's server side runs now (rex focus via a CLI child —
+        // attaching to the target session works from there); the app's
+        // view is client-side, so the outcome is still Delegated (the
+        // tool follows up with `rex -C <client> do session.select`).
         assert_eq!(
             host.jump(Jump::FocusPane {
-                pane_id: B1.to_string()
+                pane_id: target.to_string()
             })
             .unwrap(),
             JumpOutcome::Delegated
         );
+        let calls = runner.calls.borrow();
+        let focus = calls
+            .iter()
+            .find(|(args, _)| args.first().map(String::as_str) == Some("focus"))
+            .expect("jump must run rex focus for its server side");
+        assert_eq!(
+            focus.0,
+            vec![
+                "focus".to_string(),
+                "-s".to_string(),
+                target_session.to_string(),
+                target.to_string(),
+            ]
+        );
+        drop(calls);
         host.rename_window("window:01a1da11-7120-7c2d-a1ec-0dbcf977330d", "renamed")
             .unwrap();
         let calls = runner.calls.borrow();
