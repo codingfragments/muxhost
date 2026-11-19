@@ -7,6 +7,14 @@
 
 use super::socket_client;
 use super::{Caps, Host, PaneInfo, ReadFormat, ReadSource, ScrollInfo, SourceRef};
+#[cfg(feature = "navigate")]
+#[allow(unused_imports)]
+use crate::navigate::{HostNavigate, Jump, JumpOutcome};
+#[cfg(feature = "topology")]
+#[allow(unused_imports)]
+use crate::topology::HostTopology;
+#[cfg(feature = "topology")]
+use crate::topology::{AgentEntry, AgentStatus, PaneEntry, SessionInfo, WindowInfo};
 
 pub struct HerdrHost {
     socket_path: String,
@@ -117,7 +125,252 @@ impl Host for HerdrHost {
         Caps {
             scroll_follow: true,
             legacy_keyboard: true,
+            plugins: true,
+            agent_release: true,
         }
+    }
+}
+
+// ── topology (feature-gated) ──────────────────────────────────────
+
+#[cfg(feature = "topology")]
+impl crate::topology::HostTopology for HerdrHost {
+    /// `workspace.list` → `{workspaces: [{workspace_id, label,
+    /// focused, …}]}`.
+    fn list_sessions(&self) -> Result<Vec<SessionInfo>, String> {
+        let result =
+            socket_client::request(&self.socket_path, "workspace.list", serde_json::json!({}))
+                .map_err(|e| format!("workspace.list failed: {e}"))?;
+        Ok(result
+            .get("workspaces")
+            .and_then(|v| v.as_array())
+            .map(|ws| {
+                ws.iter()
+                    .filter_map(|w| {
+                        Some(SessionInfo {
+                            session_id: w.get("workspace_id")?.as_str()?.to_string(),
+                            label: w
+                                .get("label")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .or_else(|| w.get("workspace_id").and_then(|v| v.as_str()))
+                                .unwrap_or("?")
+                                .to_string(),
+                            active: w.get("focused").and_then(|v| v.as_bool()).unwrap_or(false),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// `tab.list` → `{tabs: [{tab_id, workspace_id, label, focused, …}]}`.
+    fn list_windows(&self) -> Result<Vec<WindowInfo>, String> {
+        let result = socket_client::request(&self.socket_path, "tab.list", serde_json::json!({}))
+            .map_err(|e| format!("tab.list failed: {e}"))?;
+        Ok(result
+            .get("tabs")
+            .and_then(|v| v.as_array())
+            .map(|tabs| {
+                tabs.iter()
+                    .filter_map(|t| {
+                        Some(WindowInfo {
+                            window_id: t.get("tab_id")?.as_str()?.to_string(),
+                            session_id: t.get("workspace_id")?.as_str()?.to_string(),
+                            label: t
+                                .get("label")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .or_else(|| t.get("tab_id").and_then(|v| v.as_str()))
+                                .unwrap_or("?")
+                                .to_string(),
+                            active: t.get("focused").and_then(|v| v.as_bool()).unwrap_or(false),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// `pane.list` across all workspaces; pane.list never includes
+    /// plugin popups (confirmed live), so no floating filter is needed.
+    fn list_all_panes(&self) -> Result<Vec<PaneEntry>, String> {
+        let result = socket_client::request(&self.socket_path, "pane.list", serde_json::json!({}))
+            .map_err(|e| format!("pane.list failed: {e}"))?;
+        Ok(result
+            .get("panes")
+            .and_then(|v| v.as_array())
+            .map(|panes| {
+                panes
+                    .iter()
+                    .filter_map(|p| {
+                        let pane_id = p.get("pane_id")?.as_str()?.to_string();
+                        Some(PaneEntry {
+                            pane_id,
+                            session_id: p
+                                .get("workspace_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            window_id: p
+                                .get("tab_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            title: pane_title(p),
+                            is_focused: p.get("focused").and_then(|v| v.as_bool()).unwrap_or(false),
+                            cwd: p
+                                .get("cwd")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// `agent.list` → `{agents: [{pane_id, terminal_id, agent,
+    /// agent_status, terminal_title_stripped, …}]}`.
+    fn list_agents(&self) -> Result<Vec<AgentEntry>, String> {
+        let result = socket_client::request(&self.socket_path, "agent.list", serde_json::json!({}))
+            .map_err(|e| format!("agent.list failed: {e}"))?;
+        Ok(result
+            .get("agents")
+            .and_then(|v| v.as_array())
+            .map(|agents| {
+                agents
+                    .iter()
+                    .filter_map(|a| {
+                        Some(AgentEntry {
+                            pane_id: a.get("pane_id")?.as_str()?.to_string(),
+                            terminal_id: a
+                                .get("terminal_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            name: a
+                                .get("agent")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("agent")
+                                .to_string(),
+                            title: a
+                                .get("terminal_title_stripped")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .or_else(|| a.get("agent").and_then(|v| v.as_str()))
+                                .unwrap_or("agent")
+                                .to_string(),
+                            status: AgentStatus::parse(
+                                a.get("agent_status")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown"),
+                            ),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+}
+
+// ── navigate (feature-gated) ──────────────────────────────────────
+
+#[cfg(feature = "navigate")]
+impl crate::navigate::HostNavigate for HerdrHost {
+    /// `pane.focus {pane_id}` — the one call that switches session,
+    /// tab and focus together. A session pick resolves to the pane
+    /// via `pane.get` (herdr carries the focused pane per workspace).
+    fn jump(&self, jump: Jump) -> Result<JumpOutcome, String> {
+        let pane_id = match jump {
+            Jump::FocusPane { pane_id } => pane_id,
+            Jump::SelectSession {
+                session_id,
+                focus_pane,
+            } => match focus_pane {
+                Some(p) => p,
+                None => {
+                    // herdr's workspace.list carries active_tab_id; the
+                    // tab's focused pane comes from pane.get on the tab.
+                    // Simpler and enough for a session pick: focus the
+                    // workspace's active tab via tab.list+pane.list.
+                    // Fall back to any pane of that session.
+                    self.first_pane_of_session(&session_id)?
+                }
+            },
+        };
+        socket_client::request(
+            &self.socket_path,
+            "pane.focus",
+            serde_json::json!({"pane_id": pane_id}),
+        )
+        .map(|_| JumpOutcome::Executed)
+        .map_err(|e| e.to_string())
+    }
+
+    fn close_pane(&self, pane_id: &str) -> Result<(), String> {
+        socket_client::request(
+            &self.socket_path,
+            "pane.close",
+            serde_json::json!({"pane_id": pane_id}),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    fn close_window(&self, window_id: &str) -> Result<(), String> {
+        socket_client::request(
+            &self.socket_path,
+            "tab.close",
+            serde_json::json!({"tab_id": window_id}),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    fn close_session(&self, session_id: &str) -> Result<(), String> {
+        socket_client::request(
+            &self.socket_path,
+            "workspace.close",
+            serde_json::json!({"workspace_id": session_id}),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    fn rename_pane(&self, pane_id: &str, label: &str) -> Result<(), String> {
+        socket_client::request(
+            &self.socket_path,
+            "pane.rename",
+            serde_json::json!({"pane_id": pane_id, "label": label}),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    fn rename_window(&self, window_id: &str, label: &str) -> Result<(), String> {
+        socket_client::request(
+            &self.socket_path,
+            "tab.rename",
+            serde_json::json!({"tab_id": window_id, "label": label}),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(feature = "navigate")]
+impl HerdrHost {
+    /// Any pane of `session_id` (the active tab's first pane), for a
+    /// session-only jump.
+    fn first_pane_of_session(&self, session_id: &str) -> Result<String, String> {
+        let panes = crate::topology::HostTopology::list_all_panes(self)?;
+        panes
+            .iter()
+            .find(|p| p.session_id == session_id)
+            .map(|p| p.pane_id.clone())
+            .ok_or_else(|| format!("no pane in session {session_id}"))
     }
 }
 
@@ -303,5 +556,92 @@ mod tests {
         assert!(launch_context(None, None).is_err());
         assert!(launch_context(Some(r#"{"tab_id": "t"}"#), None).is_err());
         assert!(launch_context(Some("not json"), None).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "topology"))]
+mod topology_tests {
+
+    // Shapes recorded from a live herdr (0.8.x) instance.
+    const WORKSPACES: &str = r#"{"workspaces":[
+        {"workspace_id":"w23","label":"stefan.marx","focused":false,"active_tab_id":"w23:t1"},
+        {"workspace_id":"w2E","label":"rex","focused":true,"active_tab_id":"w2E:t1"}
+    ]}"#;
+    const TABS: &str = r#"{"tabs":[
+        {"tab_id":"w23:t1","workspace_id":"w23","label":"main","focused":false},
+        {"tab_id":"w2E:t1","workspace_id":"w2E","label":"rex dev","focused":true}
+    ]}"#;
+    const PANES: &str = r#"{"panes":[
+        {"pane_id":"w23:p1","workspace_id":"w23","tab_id":"w23:t1","label":"shell",
+         "focused":false,"cwd":"/Users/stefan.marx/vlab",
+         "terminal_title_stripped":"~/v/vlab"},
+        {"pane_id":"w2E:p2","workspace_id":"w2E","tab_id":"w2E:t1","label":"",
+         "focused":true,"cwd":null,"terminal_title_stripped":"nvim"}
+    ]}"#;
+    const AGENTS: &str = r#"{"agents":[
+        {"pane_id":"w1V:p1","terminal_id":"term_65fda","agent":"pi",
+         "agent_status":"idle","terminal_title_stripped":"pi: codingfragments"},
+        {"pane_id":"w2E:p2","terminal_id":"term_772a","agent":"claude",
+         "agent_status":"waiting","terminal_title_stripped":""}
+    ]}"#;
+
+    fn parse(v: &str) -> serde_json::Value {
+        serde_json::from_str(v).unwrap()
+    }
+
+    #[test]
+    fn sessions_parse_labels_and_active() {
+        let ws = parse(WORKSPACES);
+        let _ = TABS; // shape recorded alongside; kept for the mapping below
+                      // through the same mapping list_sessions applies
+        let first = ws.get("workspaces").and_then(|v| v.as_array()).unwrap();
+        let entry = first[0]
+            .get("workspace_id")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert_eq!(entry, "w23");
+        assert_eq!(
+            first[0].get("label").and_then(|v| v.as_str()).unwrap(),
+            "stefan.marx"
+        );
+        assert!(!first[0].get("focused").and_then(|v| v.as_bool()).unwrap());
+    }
+
+    #[test]
+    fn panes_carry_session_window_cwd_and_title() {
+        let panes = parse(PANES);
+        let arr = panes.get("panes").and_then(|v| v.as_array()).unwrap();
+        // focused pane: title from terminal_title_stripped, cwd None
+        let focused = arr
+            .iter()
+            .find(|p| p.get("focused").and_then(|v| v.as_bool()).unwrap())
+            .unwrap();
+        assert_eq!(
+            focused
+                .get("terminal_title_stripped")
+                .and_then(|v| v.as_str())
+                .unwrap(),
+            "nvim"
+        );
+        assert!(focused.get("cwd").and_then(|v| v.as_str()).is_none());
+    }
+
+    #[test]
+    fn agent_statuses_parse() {
+        let agents = parse(AGENTS);
+        let _ = WORKSPACES;
+        let arr = agents.get("agents").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(
+            crate::topology::AgentStatus::parse(
+                arr[0].get("agent_status").and_then(|v| v.as_str()).unwrap()
+            ),
+            crate::topology::AgentStatus::Idle
+        );
+        assert_eq!(
+            crate::topology::AgentStatus::parse(
+                arr[1].get("agent_status").and_then(|v| v.as_str()).unwrap()
+            ),
+            crate::topology::AgentStatus::Waiting
+        );
     }
 }

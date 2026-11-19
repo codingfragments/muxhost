@@ -25,6 +25,11 @@ pub mod herdr;
 pub mod rex;
 mod socket_client;
 
+#[cfg(feature = "navigate")]
+pub mod navigate;
+#[cfg(feature = "topology")]
+pub mod topology;
+
 /// In-memory [`Host`] for unit tests in consuming crates: canned pane
 /// texts, a tab listing, and a record of every read and insert.
 pub mod fake;
@@ -92,6 +97,10 @@ pub struct Caps {
     /// The host's popup panes run the keyboard in legacy mode (key
     /// repeat/deadup quirks; distinct key events need workarounds).
     pub legacy_keyboard: bool,
+    /// The host has a plugin system (`plugin.list` / action invoke).
+    pub plugins: bool,
+    /// The host can release an agent from its pane (`pane.release_agent`).
+    pub agent_release: bool,
 }
 
 /// The multiplexer operations the tools need.
