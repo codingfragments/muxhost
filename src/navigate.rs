@@ -2,10 +2,19 @@
 //! (behind the `navigate` feature).
 //!
 //! `jump` is deliberately an enum with an outcome: herdr executes the
-//! focus directly; under Rex the app's view is client-side, so the
-//! launcher (an app-invoked Lua action) carries the jump out and the
-//! host implementation reports [`JumpOutcome::Delegated`] (see
-//! herdr-nav's rex-migration.md, the R0 spike).
+//! focus directly; under Rex the jump is SPLIT — `RexHost::jump`
+//! performs the SERVER side itself (`rex focus` on the target block,
+//! attaching to its session) and reports [`JumpOutcome::Delegated`],
+//! which means "the server state is done; the app's VIEW (selected
+//! session, tab strip) is client-side and the calling tool must move
+//! it" — via `rex -C <client> do session.select session_id=…
+//! window_id=…` (Remote Control). The tool side is responsible for
+//! the ordering traps: the select must land AFTER its popup's layer
+//! closes (a select made while the layer is open is undone by the
+//! app's focus return), and the block focus must be re-asserted
+//! AFTER the select (the app may focus the window's remembered
+//! block). See herdr-nav's `host_ext::jump` and `doc/rex.md` for the
+//! full verified sequence (rex-migration.md R0/R4).
 
 use crate::Host;
 
