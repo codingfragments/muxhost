@@ -20,17 +20,28 @@ pin by git tag; keep `main` releasable at all times.
 
 ## Checks
 
-- `just check` (fmt, clippy `-D warnings`, tests) before every commit.
-- The Rex side is exercised against recorded `session inspect`
-  fixtures in `tests/fixtures/`; re-record when the shape changes.
+- `just check` before every commit. It runs fmt, then clippy
+  `-D warnings` and the tests for **every feature combination** (core,
+  `topology`, `--all-features`), the same matrix as CI. Feature-gated
+  tests go in gated modules.
+- The Rex side is tested against recorded fixtures in
+  `tests/fixtures/rex/` (`session-inspect.json`, `topology-do.json`);
+  re-record them when the format changes (`doc/testing.md`).
+- **The docs are part of the API.** Any change to a trait, a host's
+  behaviour, an env var or the cache updates the matching `doc/*.md`
+  page and `CHANGELOG.md` in the same PR. Each feature page keeps the
+  same sections: Intent, API, herdr, Rex, Consumer contract, Tests,
+  Known limits.
 - Consumers each have their own repos and tests; a breaking trait
   change here means three repos to fix — prefer additive
   (default-method, `#[non_exhaustive]`) changes.
 
 ## Release
 
-1. Code PRs merge first.
-2. The release PR bumps `Cargo.toml` and updates the README consumer
-   table.
-3. After merging, tag (`git tag v<x.y.z> && git push origin v<x.y.z>`) —
-   no binary release; the tag is what consumers pin.
+1. Code and docs PRs merge first.
+2. The release PR bumps `Cargo.toml`, finishes the `CHANGELOG.md`
+   entry, and updates the README pin examples and consumer table.
+3. After merging, tag: `git tag -a v<x.y.z> -m "…" && git push origin v<x.y.z>`.
+   Always `-a -m`: with `tag.gpgSign=true`, a plain `git tag` opens an
+   editor and hangs a non-interactive shell. There's no binary release;
+   the tag is what consumers pin.
