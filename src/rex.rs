@@ -120,6 +120,19 @@ impl RexHost {
         }
     }
 
+    /// The session this host scopes to (`REX_SESSION` at launch).
+    pub fn session(&self) -> &str {
+        &self.session
+    }
+
+    /// Escape hatch for host-local glue in consuming tools (the same
+    /// contract as `HerdrHost::raw_request`): one raw `rex` CLI call on
+    /// this host's runner. Keep a tool's non-portable calls behind its
+    /// own local traits so the port surface stays findable.
+    pub fn run(&self, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
+        self.rex(args, stdin)
+    }
+
     fn rex(&self, args: &[&str], stdin: Option<&str>) -> Result<String, String> {
         self.runner.run(args, stdin)
     }
