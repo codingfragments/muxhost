@@ -17,6 +17,7 @@ This page covers the shape of the crate. Each feature has its own page:
 | [`core.md`](core.md) | the `Host` trait, `Caps`, host detection, the clipboard |
 | [`topology.md`](topology.md) | the session/window/pane/agent tree (`topology` feature) |
 | [`navigate.md`](navigate.md) | jump, close, rename (`navigate` feature), including what a tool must do after a Rex jump |
+| [`rex-environment.md`](rex-environment.md) | what a Rex launcher needs from the user's config (the `rex` CLI path, the login `PATH`), with a copyable `lib/env.lua` sample and troubleshooting |
 | [`testing.md`](testing.md) | `FakeHost`, the Rex runner fake, fixtures, the live test, the feature matrix |
 
 ## Layers
