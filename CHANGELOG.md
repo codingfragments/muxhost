@@ -2,6 +2,12 @@
 
 Consumers pin by git tag; every entry below is a tag.
 
+## Unreleased
+- **Docs:** `doc/rex-environment.md` (what a Rex launcher needs from the
+  user's config: the `rex` CLI path and the login `PATH`, how to set it
+  up, how to check it, troubleshooting) and a copyable sample,
+  `examples/rex/lib/env.lua`. No code change.
+
 ## v0.3.6
 - **New:** `HostKind` and `detect_kind(prefix)`, the one place the
   detection order is defined (`<PREFIX>_HOST`, then

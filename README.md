@@ -27,6 +27,8 @@ if host.caps().scroll_follow { /* herdr only */ }
 
 Also: [architecture and design rules](doc/architecture.md) · [each
 host's transport, environment and quirks](doc/hosts.md) ·
+**[setting up the Rex environment for launchers](doc/rex-environment.md)**
+(a sample `lib/env.lua` is in [`examples/rex/`](examples/rex/lib/env.lua)) ·
 [testing](doc/testing.md) · [changelog](CHANGELOG.md).
 
 ## Pinning

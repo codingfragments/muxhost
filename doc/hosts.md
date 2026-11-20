@@ -101,6 +101,10 @@ opening the layer and passes it in:
 | `<PREFIX>_SOURCE_WINDOW` | the launcher | its window (optional; worked out from the session if not set) |
 | `REX_CLI` | the launcher | absolute path of the CLI (default `rex`) |
 
+The launcher gets `REX_CLI` and the login `PATH` from the user's
+`~/.config/rex/lib/env.lua`. Setting that up, with a sample, is in
+[`rex-environment.md`](rex-environment.md).
+
 ### Construction
 
 | Constructor | When |
