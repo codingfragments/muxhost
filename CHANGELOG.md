@@ -2,7 +2,7 @@
 
 Consumers pin by git tag; every entry below is a tag.
 
-## Unreleased
+## v0.4.0
 - **Fixed:** Rex `program_status` records are parsed from the `state`
   field — the field Rex actually reports (verified live, rex
   0.1.0-preview.22; before, every agent fell through to `Unknown`
