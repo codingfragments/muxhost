@@ -36,8 +36,8 @@ host's transport, environment and quirks](doc/hosts.md) ·
 Consumers pin a git tag, plus the features they need:
 
 ```toml
-muxhost = { git = "https://github.com/codingfragments/muxhost", tag = "v0.3.6" }                                       # flash, zextract
-muxhost = { git = "https://github.com/codingfragments/muxhost", tag = "v0.3.6", features = ["topology", "navigate"] }  # nav
+muxhost = { git = "https://github.com/codingfragments/muxhost", tag = "v0.4.0" }                                       # flash, zextract
+muxhost = { git = "https://github.com/codingfragments/muxhost", tag = "v0.4.0", features = ["topology", "navigate"] }  # nav
 ```
 
 | Consumer | Features | Since |
