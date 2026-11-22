@@ -19,7 +19,7 @@ the tool's tree code doesn't care which multiplexer it runs under.
 | `WindowInfo` | `window_id`, `session_id`, `label`, `active` | `active`: the window the user is in. At most one, and only in the active session. |
 | `PaneEntry` | `pane_id`, `session_id`, `window_id`, `title`, `is_focused`, `cwd` | every pane in every session, floating panes left out. `title`: user label → terminal title → generic. `is_focused`: the pane the user is in. `cwd`: the working directory, where the host reports one. |
 | `AgentEntry` | `pane_id`, `terminal_id`, `name`, `title`, `status` | a pane running an agent |
-| `AgentStatus` | `Waiting`, `Working`, `Idle`, `Unknown` | `Waiting` = waiting for the user. `parse` / `as_str` convert from and to `"waiting"`, `"working"`, `"idle"`, `"unknown"`. |
+| `AgentStatus` | `Waiting`, `Working`, `Done`, `Error`, `Idle`, `Unknown` | `Waiting` = waiting for the user, `Done` = finished, result ready, `Error` = failed and stopped. `parse` / `as_str` convert from and to `"waiting"`, `"working"`, `"done"`, `"error"`, `"idle"`, `"unknown"`. |
 | `TopologySnapshot` | `sessions`, `windows`, `panes`, `agents` | all four at once |
 
 ### The `HostTopology` trait (extends `Host`)
@@ -100,7 +100,7 @@ What the script relies on (each verified live):
 | `PaneEntry.title` | **user label** if it isn't Rex's default `shell` → terminal title → `shell` → `pane <id>`. (Before v0.3.5 the terminal title won, so renamed panes showed as `~`.) |
 | `PaneEntry.is_focused` | `block_id == <PREFIX>_SOURCE_BLOCK`: the pane the user is in. This is more useful to a switcher than each window's own `focused_block_id`. |
 | `PaneEntry.cwd` | `pwd` returns a `file://<host>/<path>` URL. Everything from the first `/` after the host is kept; empty → `None`. |
-| `AgentEntry` | a block whose `program_status.records` is non-empty (programs report status with OSC 7501). The first record's `status`: `blocked` → `Waiting`, `working` → `Working`, `idle` → `Idle`, anything else → `Unknown`. `name` from the record (default `agent`); `terminal_id` = `block_id`. gopher-lua encodes an empty table as `{}`, so `records` may be an array or an object, and both empty forms mean "no agent". |
+| `AgentEntry` | a block whose `program_status.records` is non-empty (programs report status with OSC 7501). The first record's `state` (verified live, rex 0.1.0-preview.22; a spike-era `status` spelling is still accepted) maps via `AgentStatus::parse`: `blocked` → `Waiting`, `working` → `Working`, `done` → `Done`, `error` → `Error`, `idle` → `Idle`, anything else → `Unknown`. `name` from the record's `app` (then `name`, then `agent`); `terminal_id` = `block_id`. gopher-lua encodes an empty table as `{}`, so `records` may be an array or an object, and both empty forms mean "no agent". |
 
 ### The cache
 
@@ -133,16 +133,19 @@ One `RefCell<Option<(Instant, TopologySnapshot)>>` per host:
 (three sessions, four windows, six blocks): parsing titles, cwd and
 the active flags; the cache (one `rex do -` serves every list); the
 user's window marked active (source block vs `active_window_id`);
-user labels winning over terminal titles. There is also an ignored live
+user labels winning over terminal titles; `program_status` records
+in the live OSC 7501 shape (`state` + `app`, plus `done` and `error`)
+and the spike-era `status` fallback. There is also an ignored live
 test, `live_rex_topology_snapshot`, see [`testing.md`](testing.md).
 `herdr.rs::topology_tests` uses socket replies recorded from herdr 0.8.
 
 ## Known limits
 
-- **Rex agents aren't verified live.** No block reported a
-  `program_status` during the spike, so the record format is handled
-  loosely (array or object, a `status` field). Check it against a real
-  agent that reports OSC 7501.
+- **Rex agents are verified live** against rex 0.1.0-preview.22 with
+  a reporting pi (records use `state` and `app`). The spike-era
+  defensive parsing stays as a fallback. `done` and `error` records
+  survive a finished run, so finished and failed agents stay listed
+  until something replaces the record.
 - **Rex `REX_SESSION` must be an id.** A label still works for CLI
   calls but won't match `session_id`, so no session is marked active.
 - **herdr `active` comes from herdr's `focused`,** which marks the

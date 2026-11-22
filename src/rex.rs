@@ -543,8 +543,12 @@ fn block_pwd(b: &serde_json::Value) -> Option<String> {
 /// A block's agent entry when its program status reports records
 /// (`block_call … program_status` → {records: [...]}; gopher-lua also
 /// serializes an empty records table as {} — both empty shapes mean
-/// "no agent"). The record's `status` maps blocked→waiting (an agent
-/// blocked on the user), working→working, idle→idle.
+/// "no agent"). The record's `state` (verified live against rex
+/// 0.1.0-preview.22; the spike-era `status` spelling stays as a
+/// fallback) maps via `AgentStatus::parse`: `blocked` → waiting (an
+/// agent blocked on the user), `working` → working, `done` → done,
+/// `error` → error, `idle` → idle. `name` comes from the record's
+/// `app` (falling back to `name`, then `agent`).
 #[cfg(feature = "topology")]
 fn block_agent(
     b: &serde_json::Value,
@@ -562,17 +566,18 @@ fn block_agent(
                 .map(|m| m.values().cloned().collect::<Vec<_>>())
         })?;
     let first = records.first()?;
-    let status = match first.get("status").and_then(|s| s.as_str()) {
-        Some("working") => AgentStatus::Working,
-        Some("blocked") => AgentStatus::Waiting,
-        Some("idle") => AgentStatus::Idle,
-        _ => AgentStatus::Unknown,
-    };
+    let state = first
+        .get("state")
+        .or_else(|| first.get("status"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    let status = AgentStatus::parse(state);
     Some(AgentEntry {
         pane_id: pane.pane_id.clone(),
         terminal_id: pane.pane_id.clone(),
         name: first
-            .get("name")
+            .get("app")
+            .or_else(|| first.get("name"))
             .and_then(|n| n.as_str())
             .unwrap_or("agent")
             .to_string(),
@@ -1249,6 +1254,15 @@ mod tests {
                     eprintln!("    - {} cwd={:?} title={:?}", p.pane_id, p.cwd, p.title);
                 }
             }
+            eprintln!("agents: {}", snap.agents.len());
+            for a in &snap.agents {
+                eprintln!(
+                    "  {} name={:?} status={:?}",
+                    a.pane_id,
+                    a.name,
+                    a.status.as_str()
+                );
+            }
             assert!(!snap.sessions.is_empty());
         }
         #[test]
@@ -1286,6 +1300,87 @@ mod tests {
                 .find(|p| p.pane_id == "block:shelly")
                 .unwrap();
             assert_eq!(shelly.title, "~/src");
+        }
+
+        #[test]
+        fn topology_maps_program_status_state_records() {
+            // The live OSC 7501 record shape (verified against rex
+            // 0.1.0-preview.22 with a reporting pi): {state, kind,
+            // app, msg, …} — the field is `state`, not `status`, and
+            // the agent name is `app`. Done and error records survive
+            // a finished run, so they must surface as agents too.
+            let doc = serde_json::json!({
+                "sessions": [{
+                    "session_id": "session:sA", "label": "A",
+                    "windows": [{
+                        "window_id": "window:wA", "label": "wA",
+                        "blocks": [
+                            { "block_id": "block:pi", "label": "shell",
+                              "title": { "title": "π - nav" },
+                              "program_status": { "records": [
+                                  { "state": "working", "app": "pi",
+                                    "msg": "bmF2",
+                                    "owner": { "pid": 4677, "name": "pi" } } ] } },
+                            { "block_id": "block:cc", "label": "shell",
+                              "title": { "title": "cx - review" },
+                              "program_status": { "records": [
+                                  { "state": "blocked", "kind": "permission",
+                                    "app": "claude-code" } ] } },
+                            { "block_id": "block:fin", "label": "shell",
+                              "title": { "title": "π - done" },
+                              "program_status": { "records": [
+                                  { "state": "done", "app": "pi" } ] } },
+                            { "block_id": "block:err", "label": "shell",
+                              "title": { "title": "cx - failed" },
+                              "program_status": { "records": [
+                                  { "state": "error", "app": "codex" } ] } },
+                            { "block_id": "block:idle", "label": "shell",
+                              "title": { "title": "π - idle" },
+                              "program_status": { "records": [
+                                  { "state": "idle", "app": "pi" } ] } },
+                        ],
+                    }],
+                }],
+            });
+            let snap = parse_topology(&doc, "session:sA", "").unwrap();
+            let find = |pid: &str| {
+                snap.agents
+                    .iter()
+                    .find(|a| a.pane_id == pid)
+                    .unwrap_or_else(|| panic!("no agent for {pid}"))
+            };
+            assert_eq!(snap.agents.len(), 5);
+            assert_eq!((find("block:pi").status).as_str(), "working");
+            assert_eq!(find("block:pi").name, "pi");
+            assert_eq!((find("block:cc").status).as_str(), "waiting");
+            assert_eq!(find("block:cc").name, "claude-code");
+            assert_eq!((find("block:fin").status).as_str(), "done");
+            assert_eq!((find("block:err").status).as_str(), "error");
+            assert_eq!((find("block:idle").status).as_str(), "idle");
+        }
+
+        #[test]
+        fn topology_falls_back_to_spike_status_field() {
+            // The defensive spike-era shape (a `status` field) still
+            // parses, so an older Rex build can't lose its agents.
+            let doc = serde_json::json!({
+                "sessions": [{
+                    "session_id": "session:sA", "label": "A",
+                    "windows": [{
+                        "window_id": "window:wA", "label": "wA",
+                        "blocks": [
+                            { "block_id": "block:b1", "label": "shell",
+                              "title": { "title": "~" },
+                              "program_status": { "records": [
+                                  { "status": "blocked", "name": "legacy" } ] } },
+                        ],
+                    }],
+                }],
+            });
+            let snap = parse_topology(&doc, "session:sA", "").unwrap();
+            assert_eq!(snap.agents.len(), 1);
+            assert_eq!(snap.agents[0].status.as_str(), "waiting");
+            assert_eq!(snap.agents[0].name, "legacy");
         }
     }
 }
