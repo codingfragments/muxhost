@@ -10,10 +10,15 @@ use crate::Host;
 /// An agent's status as the host reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {
-    /// Waiting on the user (a question, a prompt).
+    /// Waiting on the user (a question, a prompt, a permission).
     Waiting,
     /// Busy running.
     Working,
+    /// Finished a piece of work; the result is ready to look at
+    /// (Rex OSC 7501 `done`).
+    Done,
+    /// Failed and stopped (Rex OSC 7501 `error`).
+    Error,
     /// Sitting idle.
     Idle,
     /// Anything else or unreported.
@@ -25,6 +30,8 @@ impl AgentStatus {
         match s {
             "waiting" | "blocked" => Self::Waiting,
             "working" => Self::Working,
+            "done" => Self::Done,
+            "error" => Self::Error,
             "idle" => Self::Idle,
             _ => Self::Unknown,
         }
@@ -33,6 +40,8 @@ impl AgentStatus {
         match self {
             Self::Waiting => "waiting",
             Self::Working => "working",
+            Self::Done => "done",
+            Self::Error => "error",
             Self::Idle => "idle",
             Self::Unknown => "unknown",
         }

@@ -3,6 +3,16 @@
 Consumers pin by git tag; every entry below is a tag.
 
 ## Unreleased
+- **Fixed:** Rex `program_status` records are parsed from the `state`
+  field — the field Rex actually reports (verified live, rex
+  0.1.0-preview.22; before, every agent fell through to `Unknown`
+  because the spike looked for a `status` field, which no record
+  carries). The spike-era `status` spelling stays as a fallback.
+- **New:** `AgentStatus::Done` and `AgentStatus::Error` — Rex OSC 7501
+  has finished (`done`) and failed (`error`) states and they survive a
+  run's end; `parse`/`as_str` map `"done"` and `"error"`. Agent names
+  come from the record's `app` (pi, claude-code, …) instead of the
+  default `agent`.
 - **Docs:** `doc/rex-environment.md` (what a Rex launcher needs from the
   user's config: the `rex` CLI path and the login `PATH`, how to set it
   up, how to check it, troubleshooting) and a copyable sample,
