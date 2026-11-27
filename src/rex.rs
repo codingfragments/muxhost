@@ -281,7 +281,8 @@ impl Host for RexHost {
 // One server-side Lua script (`rex do -`, piped on stdin) collects the
 // whole topology in a single round trip: session.list, each session's
 // view (via session.attach, which returns it inline), and per block
-// the terminal title, pwd and program status (block.method). Verified
+// the terminal title, pwd, program status, and (only when program
+// status has records) the live process tree (block.method). Verified
 // live (rex 0.1.0-preview.19, 2026-11): ~50 ms for several sessions —
 // the four list methods each re-running it would blow any popup's
 // build budget, hence the cached snapshot.
@@ -329,12 +330,18 @@ for _, s in ipairs(ls.sessions or {}) do
       for _, layer in ipairs(w.layers or {}) do
         if layer.kind == "tiled" then
           for _, b in ipairs(layer.blocks or {}) do
+            local ps = block_call(sid, b.block_id, "program_status")
+            local proc = nil
+            if type(ps) == "table" and type(ps.records) == "table" and next(ps.records) ~= nil then
+              proc = block_call(sid, b.block_id, "process")
+            end
             window.blocks[#window.blocks + 1] = {
               block_id = b.block_id,
               label = b.label,
               title = block_call(sid, b.block_id, "title"),
               pwd = block_call(sid, b.block_id, "pwd"),
-              program_status = block_call(sid, b.block_id, "program_status"),
+              program_status = ps,
+              process = proc,
             }
           end
         end
@@ -540,15 +547,24 @@ fn block_pwd(b: &serde_json::Value) -> Option<String> {
     (!path.is_empty()).then(|| path.to_string())
 }
 
-/// A block's agent entry when its program status reports records
-/// (`block_call … program_status` → {records: [...]}; gopher-lua also
-/// serializes an empty records table as {} — both empty shapes mean
-/// "no agent"). The record's `state` (verified live against rex
-/// 0.1.0-preview.22; the spike-era `status` spelling stays as a
-/// fallback) maps via `AgentStatus::parse`: `blocked` → waiting (an
-/// agent blocked on the user), `working` → working, `done` → done,
-/// `error` → error, `idle` → idle. `name` comes from the record's
-/// `app` (falling back to `name`, then `agent`).
+/// A block's agent entry when its program status reports an active
+/// record (`block_call … program_status` → {records: [...]}; gopher-lua
+/// also serializes an empty records table as {} — both empty shapes mean
+/// "no agent").
+///
+/// OSC 7501 records (especially `idle`, `done`, and `error`) can outlive
+/// the process that emitted them once the pane returns to its shell.
+/// When `process` is present on the block, each record's `owner`
+/// (`{pid, name}`) is verified against `process.foreground` and
+/// `process.ancestors` (so an agent temporarily running a foreground
+/// child stays listed, while exited agents are filtered out).
+///
+/// The record's `state` (verified live against rex 0.1.0-preview.22;
+/// the spike-era `status` spelling stays as a fallback) maps via
+/// `AgentStatus::parse`: `blocked` → waiting (an agent blocked on the
+/// user), `working` → working, `done` → done, `error` → error, `idle` →
+/// idle. `name` comes from the record's `app` (falling back to `name`,
+/// then `agent`).
 #[cfg(feature = "topology")]
 fn block_agent(
     b: &serde_json::Value,
@@ -565,7 +581,10 @@ fn block_agent(
                 .and_then(|r| r.as_object())
                 .map(|m| m.values().cloned().collect::<Vec<_>>())
         })?;
-    let first = records.first()?;
+    let proc_info = b.get("process");
+    let first = records
+        .into_iter()
+        .find(|r| record_is_active(r, proc_info))?;
     let state = first
         .get("state")
         .or_else(|| first.get("status"))
@@ -584,6 +603,47 @@ fn block_agent(
         title: title.clone().unwrap_or_else(|| pane.title.clone()),
         status,
     })
+}
+
+/// Whether a `program_status` record is still backed by a live process
+/// in the block.
+///
+/// Compares both `pid` and `name` (Rex's schema warns that OS PIDs wrap)
+/// against `process.foreground` and `process.ancestors`, and drops the
+/// record if `process.last_exit` is non-null. Falls back to `true` when
+/// `process` wasn't fetched, `foreground` couldn't be read, or the
+/// record carries no `owner` (older Rex servers / fixtures).
+#[cfg(feature = "topology")]
+fn record_is_active(record: &serde_json::Value, process: Option<&serde_json::Value>) -> bool {
+    let Some(proc_info) = process.filter(|p| p.is_object()) else {
+        return true;
+    };
+    if proc_info.get("last_exit").is_some_and(|v| !v.is_null()) {
+        return false;
+    }
+    let Some(owner) = record.get("owner").filter(|o| o.is_object()) else {
+        return true;
+    };
+    let (Some(owner_pid), Some(owner_name)) = (
+        owner.get("pid").and_then(|v| v.as_i64()),
+        owner.get("name").and_then(|v| v.as_str()),
+    ) else {
+        return true;
+    };
+    let Some(fg) = proc_info.get("foreground").filter(|f| f.is_object()) else {
+        return true;
+    };
+    let matches = |p: &serde_json::Value| {
+        p.get("pid").and_then(|v| v.as_i64()) == Some(owner_pid)
+            && p.get("name").and_then(|v| v.as_str()) == Some(owner_name)
+    };
+    if matches(fg) {
+        return true;
+    }
+    proc_info
+        .get("ancestors")
+        .and_then(|a| a.as_array())
+        .is_some_and(|anc| anc.iter().any(matches))
 }
 
 #[cfg(feature = "topology")]
@@ -1381,6 +1441,113 @@ mod tests {
             assert_eq!(snap.agents.len(), 1);
             assert_eq!(snap.agents[0].status.as_str(), "waiting");
             assert_eq!(snap.agents[0].name, "legacy");
+        }
+
+        #[test]
+        fn topology_filters_stale_program_status_records() {
+            // OSC 7501 records can linger after an agent exits back to
+            // the shell. Cross-checking record.owner against
+            // process.foreground ∪ process.ancestors (by both pid and
+            // name) keeps active agents (including ones running a
+            // foreground child) and drops stale or exited ones.
+            let doc = serde_json::json!({
+                "sessions": [{
+                    "session_id": "session:sA", "label": "A",
+                    "windows": [{
+                        "window_id": "window:wA", "label": "wA",
+                        "blocks": [
+                            // 1. Live foreground agent → kept.
+                            { "block_id": "block:fg", "label": "ai",
+                              "title": { "title": "π - nav" },
+                              "program_status": { "records": [
+                                  { "state": "working", "app": "pi",
+                                    "owner": { "pid": 53124, "name": "pi" } } ] },
+                              "process": {
+                                  "last_exit": null,
+                                  "foreground": { "pid": 53124, "name": "pi" },
+                                  "ancestors": [
+                                      { "pid": 52774, "name": "fish" },
+                                      { "pid": 52768, "name": "login" } ] } },
+                            // 2. Agent with foreground child (owner in ancestors) → kept.
+                            { "block_id": "block:anc", "label": "ai",
+                              "title": { "title": "π - edit" },
+                              "program_status": { "records": [
+                                  { "state": "working", "app": "pi",
+                                    "owner": { "pid": 60001, "name": "pi" } } ] },
+                              "process": {
+                                  "last_exit": null,
+                                  "foreground": { "pid": 60500, "name": "nvim" },
+                                  "ancestors": [
+                                      { "pid": 60001, "name": "pi" },
+                                      { "pid": 59900, "name": "fish" } ] } },
+                            // 3. Stale idle record after agent exited to fish → dropped.
+                            { "block_id": "block:stale", "label": "shell",
+                              "title": { "title": "~/proj" },
+                              "program_status": { "records": [
+                                  { "state": "idle", "app": "antigravity",
+                                    "owner": { "pid": 88561, "name": "agy" } } ] },
+                              "process": {
+                                  "last_exit": null,
+                                  "foreground": { "pid": 4750, "name": "fish" },
+                                  "ancestors": [
+                                      { "pid": 4725, "name": "login" } ] } },
+                            // 4. PID reuse (same pid, different name) → dropped.
+                            { "block_id": "block:reuse", "label": "shell",
+                              "title": { "title": "vim" },
+                              "program_status": { "records": [
+                                  { "state": "done", "app": "pi",
+                                    "owner": { "pid": 7777, "name": "pi" } } ] },
+                              "process": {
+                                  "last_exit": null,
+                                  "foreground": { "pid": 7777, "name": "vim" },
+                                  "ancestors": [
+                                      { "pid": 4750, "name": "fish" } ] } },
+                            // 5. Terminal child exited (last_exit non-null) → dropped even without owner.
+                            { "block_id": "block:exited", "label": "shell",
+                              "title": { "title": "π - dead" },
+                              "program_status": { "records": [
+                                  { "state": "error", "app": "pi" } ] },
+                              "process": {
+                                  "last_exit": { "exit_code": 1 },
+                                  "foreground": null } },
+                            // 6. Stale first record + live second record → picks live one.
+                            { "block_id": "block:mixed", "label": "ai",
+                              "title": { "title": "π - mix" },
+                              "program_status": { "records": [
+                                  { "state": "idle", "app": "old",
+                                    "owner": { "pid": 111, "name": "old" } },
+                                  { "state": "blocked", "app": "claude-code",
+                                    "owner": { "pid": 222, "name": "claude" } } ] },
+                              "process": {
+                                  "last_exit": null,
+                                  "foreground": { "pid": 222, "name": "claude" },
+                                  "ancestors": [] } },
+                            // 7. Record without owner and live process → fallback kept.
+                            { "block_id": "block:no-owner", "label": "ai",
+                              "title": { "title": "π - no-owner" },
+                              "program_status": { "records": [
+                                  { "state": "done", "app": "pi" } ] },
+                              "process": {
+                                  "last_exit": null,
+                                  "foreground": { "pid": 9999, "name": "pi" },
+                                  "ancestors": [] } },
+                        ],
+                    }],
+                }],
+            });
+            let snap = parse_topology(&doc, "session:sA", "").unwrap();
+            let ids: Vec<&str> = snap.agents.iter().map(|a| a.pane_id.as_str()).collect();
+            assert_eq!(
+                ids,
+                vec!["block:fg", "block:anc", "block:mixed", "block:no-owner"]
+            );
+            let mixed = snap
+                .agents
+                .iter()
+                .find(|a| a.pane_id == "block:mixed")
+                .unwrap();
+            assert_eq!(mixed.name, "claude-code");
+            assert_eq!(mixed.status.as_str(), "waiting");
         }
     }
 }
