@@ -2,7 +2,7 @@
 
 Consumers pin by git tag; every entry below is a tag.
 
-## Unreleased
+## v0.4.1
 - **Fixed (Rex):** `list_agents` / `topology_snapshot` now filters out
   stale OSC 7501 `program_status` records left behind after an agent
   exits back to the shell. `TOPOLOGY_SCRIPT` calls `block.method`
