@@ -2,6 +2,15 @@
 
 Consumers pin by git tag; every entry below is a tag.
 
+## Unreleased
+- **Fixed (Rex):** `list_agents` / `topology_snapshot` now filters out
+  stale OSC 7501 `program_status` records left behind after an agent
+  exits back to the shell. `TOPOLOGY_SCRIPT` calls `block.method`
+  `process` only for blocks with status records, and `block_agent`
+  checks `record.owner` (`pid` and `name`) against `process.foreground`
+  and `process.ancestors` (dropping blocks where `last_exit` is
+  non-null; keeping records without `owner` or `process` as a fallback).
+
 ## v0.4.0
 - **Fixed:** Rex `program_status` records are parsed from the `state`
   field — the field Rex actually reports (verified live, rex

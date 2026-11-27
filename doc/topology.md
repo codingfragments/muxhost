@@ -73,9 +73,11 @@ for each session:
                 block.method { method = "title" }
                 block.method { method = "pwd" }
                 block.method { method = "program_status" }
+                if program_status.records is non-empty:
+                    block.method { method = "process" }
 return { sessions = [ { session_id, label, active_window_id,
                         windows = [ { window_id, label, focused_block_id,
-                                      blocks = [ { block_id, label, title, pwd, program_status } ] } ] } ] }
+                                      blocks = [ { block_id, label, title, pwd, program_status, process? } ] } ] } ] }
 ```
 
 What the script relies on (each verified live):
@@ -100,7 +102,7 @@ What the script relies on (each verified live):
 | `PaneEntry.title` | **user label** if it isn't Rex's default `shell` → terminal title → `shell` → `pane <id>`. (Before v0.3.5 the terminal title won, so renamed panes showed as `~`.) |
 | `PaneEntry.is_focused` | `block_id == <PREFIX>_SOURCE_BLOCK`: the pane the user is in. This is more useful to a switcher than each window's own `focused_block_id`. |
 | `PaneEntry.cwd` | `pwd` returns a `file://<host>/<path>` URL. Everything from the first `/` after the host is kept; empty → `None`. |
-| `AgentEntry` | a block whose `program_status.records` is non-empty (programs report status with OSC 7501). The first record's `state` (verified live, rex 0.1.0-preview.22; a spike-era `status` spelling is still accepted) maps via `AgentStatus::parse`: `blocked` → `Waiting`, `working` → `Working`, `done` → `Done`, `error` → `Error`, `idle` → `Idle`, anything else → `Unknown`. `name` from the record's `app` (then `name`, then `agent`); `terminal_id` = `block_id`. gopher-lua encodes an empty table as `{}`, so `records` may be an array or an object, and both empty forms mean "no agent". |
+| `AgentEntry` | a block whose `program_status.records` has at least one active record (programs report status with OSC 7501). When `process` is fetched (only for blocks with records), records are filtered against it: a non-null `last_exit` drops the block, and a record carrying `owner: {pid, name}` must match `process.foreground` or an entry in `process.ancestors` (both `pid` and `name`, guarding against PID reuse while keeping agents that spawn a foreground child). Missing `process`, `foreground`, or `owner` falls back to keeping the record. The first active record's `state` (verified live, rex 0.1.0-preview.22; a spike-era `status` spelling is still accepted) maps via `AgentStatus::parse`: `blocked` → `Waiting`, `working` → `Working`, `done` → `Done`, `error` → `Error`, `idle` → `Idle`, anything else → `Unknown`. `name` from the record's `app` (then `name`, then `agent`); `terminal_id` = `block_id`. gopher-lua encodes an empty table as `{}`, so `records` may be an array or an object, and both empty forms mean "no agent". |
 
 ### The cache
 
@@ -134,18 +136,20 @@ One `RefCell<Option<(Instant, TopologySnapshot)>>` per host:
 the active flags; the cache (one `rex do -` serves every list); the
 user's window marked active (source block vs `active_window_id`);
 user labels winning over terminal titles; `program_status` records
-in the live OSC 7501 shape (`state` + `app`, plus `done` and `error`)
-and the spike-era `status` fallback. There is also an ignored live
-test, `live_rex_topology_snapshot`, see [`testing.md`](testing.md).
+in the live OSC 7501 shape (`state` + `app`, plus `done` and `error`),
+stale-record filtering against `process.foreground` / `ancestors` /
+`last_exit`, and the spike-era `status` fallback. There is also an
+ignored live test, `live_rex_topology_snapshot`, see [`testing.md`](testing.md).
 `herdr.rs::topology_tests` uses socket replies recorded from herdr 0.8.
 
 ## Known limits
 
 - **Rex agents are verified live** against rex 0.1.0-preview.22 with
   a reporting pi (records use `state` and `app`). The spike-era
-  defensive parsing stays as a fallback. `done` and `error` records
-  survive a finished run, so finished and failed agents stay listed
-  until something replaces the record.
+  defensive parsing stays as a fallback. Stale OSC 7501 records whose
+  `owner` process has exited back to the shell are filtered out via
+  `process.foreground` / `process.ancestors`; records without an
+  `owner` field stay listed until replaced.
 - **Rex `REX_SESSION` must be an id.** A label still works for CLI
   calls but won't match `session_id`, so no session is marked active.
 - **herdr `active` comes from herdr's `focused`,** which marks the
